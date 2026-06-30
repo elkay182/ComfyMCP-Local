@@ -88,6 +88,20 @@ export class AssetRepository {
     return record;
   }
 
+  findById(assetId: string): AssetRecord | undefined {
+    const row = this.#db
+      .prepare<[string], AssetRow>(
+        `
+          SELECT asset_id, job_id, prompt_id, node_id, kind, mime_type, comfyui_filename,
+                 subfolder, storage_type, resource_uri, metadata_json, created_at
+          FROM assets
+          WHERE asset_id = ?
+        `
+      )
+      .get(assetId);
+    return row ? rowToRecord(row) : undefined;
+  }
+
   listByJobId(jobId: string): AssetRecord[] {
     return this.#db
       .prepare<[string], AssetRow>(

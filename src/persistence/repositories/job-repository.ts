@@ -11,6 +11,28 @@ export type JobState =
   | "cancelled"
   | "lost";
 
+export const JOB_STATES = [
+  "queued",
+  "running",
+  "cancelling",
+  "reconciling",
+  "succeeded",
+  "failed",
+  "cancelled",
+  "lost"
+] as const satisfies readonly JobState[];
+
+export const ACTIVE_JOB_STATES = [
+  "queued",
+  "running",
+  "cancelling",
+  "reconciling"
+] as const satisfies readonly JobState[];
+
+export function isActiveJobState(state: JobState): boolean {
+  return (ACTIVE_JOB_STATES as readonly string[]).includes(state);
+}
+
 export type JobRecord = {
   jobId: string;
   actorId: string;
@@ -24,6 +46,11 @@ export type JobRecord = {
   error?: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
+};
+
+export type JobListResult = {
+  jobs: JobRecord[];
+  nextCursor?: string;
 };
 
 type JobRow = {
@@ -125,6 +152,82 @@ export class JobRepository {
     return row ? rowToRecord(row) : undefined;
   }
 
+  list(input: { state?: JobState; cursor?: string; limit?: number } = {}): JobListResult {
+    const limit = Math.min(Math.max(input.limit ?? 50, 1), 100);
+    const offset = cursorToOffset(input.cursor);
+    const rows = input.state
+      ? this.#db
+          .prepare<{ state: string; limit: number; offset: number }, JobRow>(
+            `
+              SELECT job_id, actor_id, kind, state, workflow_id, prompt_id, idempotency_key,
+                     request_json, result_json, error_json, created_at, updated_at
+              FROM jobs
+              WHERE state = @state
+              ORDER BY created_at DESC, job_id DESC
+              LIMIT @limit OFFSET @offset
+            `
+          )
+          .all({ state: input.state, limit: limit + 1, offset })
+      : this.#db
+          .prepare<{ limit: number; offset: number }, JobRow>(
+            `
+              SELECT job_id, actor_id, kind, state, workflow_id, prompt_id, idempotency_key,
+                     request_json, result_json, error_json, created_at, updated_at
+              FROM jobs
+              ORDER BY created_at DESC, job_id DESC
+              LIMIT @limit OFFSET @offset
+            `
+          )
+          .all({ limit: limit + 1, offset });
+    const page = rows.slice(0, limit).map(rowToRecord);
+    return {
+      jobs: page,
+      ...(rows.length > limit ? { nextCursor: String(offset + limit) } : {})
+    };
+  }
+
+  listByStates(states: readonly JobState[]): JobRecord[] {
+    if (states.length === 0) {
+      return [];
+    }
+    const placeholders = states.map(() => "?").join(", ");
+    return this.#db
+      .prepare<JobState[], JobRow>(
+        `
+          SELECT job_id, actor_id, kind, state, workflow_id, prompt_id, idempotency_key,
+                 request_json, result_json, error_json, created_at, updated_at
+          FROM jobs
+          WHERE state IN (${placeholders})
+          ORDER BY created_at ASC, job_id ASC
+        `
+      )
+      .all(...states)
+      .map(rowToRecord);
+  }
+
+  markActiveForReconciliation(): JobRecord[] {
+    const candidates = this.listByStates(ACTIVE_JOB_STATES);
+    if (candidates.length === 0) {
+      return [];
+    }
+    const now = new Date().toISOString();
+    const placeholders = ACTIVE_JOB_STATES.map(() => "?").join(", ");
+    this.#db
+      .prepare<[string, ...JobState[]]>(
+        `
+          UPDATE jobs
+          SET state = 'reconciling',
+              updated_at = ?
+          WHERE state IN (${placeholders})
+        `
+      )
+      .run(now, ...ACTIVE_JOB_STATES);
+    return candidates.flatMap((job) => {
+      const updated = this.findById(job.jobId);
+      return updated ? [updated] : [];
+    });
+  }
+
   update(input: {
     jobId: string;
     state: JobState;
@@ -161,6 +264,33 @@ export class JobRepository {
       });
     return this.findById(input.jobId);
   }
+
+  cancel(jobId: string): JobRecord | undefined {
+    const existing = this.findById(jobId);
+    if (!existing) {
+      return undefined;
+    }
+    if (!isActiveJobState(existing.state)) {
+      return existing;
+    }
+    return this.update({
+      jobId,
+      state: "cancelled",
+      promptId: existing.promptId,
+      error: {
+        code: "CANCELLED",
+        message: "Job was cancelled before completion"
+      }
+    });
+  }
+}
+
+function cursorToOffset(cursor: string | undefined): number {
+  if (!cursor) {
+    return 0;
+  }
+  const parsed = Number(cursor);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
 }
 
 function rowToRecord(row: JobRow): JobRecord {

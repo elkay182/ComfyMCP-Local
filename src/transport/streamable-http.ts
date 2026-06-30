@@ -5,6 +5,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { ComfyMcpConfig } from "../config/schema.js";
+import { ComfyRestClient } from "../comfyui/rest-client.js";
 import { defaultStateDir } from "../config/paths.js";
 import { validateHttpStartupSettings } from "../config/validation.js";
 import { createMcpServer } from "../mcp/server.js";
@@ -16,6 +17,7 @@ import {
   HttpSessionRepository,
   JobRepository
 } from "../persistence/repositories/index.js";
+import { startJobReconciliation } from "../services/jobs/job-runner.js";
 import { admissionFailureBody, admitHttpRequest } from "./http-admission.js";
 import { hashSessionId } from "./http-session.js";
 import { loadTlsMaterial } from "./tls.js";
@@ -56,21 +58,32 @@ export async function startStreamableHttpServer(
   const authTokens = new AuthTokenRepository(database.db);
   const sessions = new HttpSessionRepository(database.db);
   const auditEvents = new AuditEventRepository(database.db);
+  const jobs = new JobRepository(database.db);
+  const assets = new AssetRepository(database.db);
+  const comfyRestClient = new ComfyRestClient(config);
 
   if (!options.skipStartupValidation) {
     assertStreamableHttpReady(config, authTokens.countActive());
   }
 
+  startJobReconciliation({
+    config,
+    jobs,
+    assets,
+    rest: comfyRestClient
+  });
+
   const runtimes = new Map<string, SessionRuntime>();
   const listener = (request: IncomingMessage, response: ServerResponse) => {
     void handleMcpHttpRequest(config, request, response, {
-    authTokens,
-    sessions,
-    auditEvents,
-    jobs: new JobRepository(database.db),
-    assets: new AssetRepository(database.db),
-    runtimes
-  });
+      authTokens,
+      sessions,
+      auditEvents,
+      jobs,
+      assets,
+      comfyRestClient,
+      runtimes
+    });
   };
 
   const server =
@@ -125,6 +138,7 @@ async function handleMcpHttpRequest(
     auditEvents: AuditEventRepository;
     jobs: JobRepository;
     assets: AssetRepository;
+    comfyRestClient: ComfyRestClient;
     runtimes: Map<string, SessionRuntime>;
   }
 ): Promise<void> {
@@ -194,6 +208,7 @@ async function dispatchAdmittedRequest(
     auditEvents: AuditEventRepository;
     jobs: JobRepository;
     assets: AssetRepository;
+    comfyRestClient: ComfyRestClient;
     runtimes: Map<string, SessionRuntime>;
   }
 ): Promise<void> {
@@ -269,13 +284,15 @@ async function initializeHttpSession(
     auditEvents: AuditEventRepository;
     jobs: JobRepository;
     assets: AssetRepository;
+    comfyRestClient: ComfyRestClient;
     runtimes: Map<string, SessionRuntime>;
   }
 ): Promise<void> {
   const mcpServer = createMcpServer(config, {
     actorId: admission.actorId,
     jobs: context.jobs,
-    assets: context.assets
+    assets: context.assets,
+    comfyRestClient: context.comfyRestClient
   });
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: () => `session_${crypto.randomBytes(32).toString("base64url")}`,

@@ -1,6 +1,12 @@
 import crypto from "node:crypto";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { CallToolResult, ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
+import {
+  ErrorCode as McpErrorCode,
+  McpError,
+  type CallToolResult,
+  type ReadResourceResult,
+  type ToolAnnotations
+} from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import type { ComfyMcpConfig } from "../config/schema.js";
 import { ComfyRestClient } from "../comfyui/rest-client.js";
@@ -8,9 +14,17 @@ import { ComfyUiError } from "../comfyui/errors.js";
 import type { MutationClass } from "../policy/authorization.js";
 import { decideWorkflowPolicy } from "../policy/workflow-policy.js";
 import type { AssetRepository } from "../persistence/repositories/asset-repository.js";
-import type { JobRepository } from "../persistence/repositories/job-repository.js";
+import {
+  JOB_STATES,
+  type JobRecord,
+  type JobRepository
+} from "../persistence/repositories/job-repository.js";
 import { errorEnvelope, okEnvelope, type ErrorCode } from "../schemas/envelope.js";
 import { workflowRunInputSchema, type WorkflowRunInput } from "../schemas/workflow.js";
+import {
+  WorkflowJobRunner,
+  type WorkflowJobRunnerOptions
+} from "../services/jobs/job-runner.js";
 import { getSystemStatusWithConnection } from "../services/system/status.js";
 import { listTools, type ToolDefinition } from "../tools/index.js";
 import { systemCapabilities } from "../tools/system.js";
@@ -23,6 +37,7 @@ export type SystemToolDependencies = {
   jobs?: JobRepository;
   assets?: AssetRepository;
   comfyRestClient?: ComfyRestClient;
+  jobRunnerOptions?: WorkflowJobRunnerOptions;
   actorId?: string;
 };
 
@@ -32,6 +47,17 @@ const workflowValidateInputSchema = z.object({
 
 const jobsGetInputSchema = z.object({
   job_id: z.string().min(1)
+});
+
+const jobsListInputSchema = z.object({
+  cursor: z.string().optional(),
+  limit: z.number().int().positive().max(100).optional(),
+  state: z.enum(JOB_STATES).optional()
+});
+
+const jobsCancelInputSchema = z.object({
+  job_id: z.string().min(1),
+  idempotency_key: z.string().min(1).optional()
 });
 
 export function createMcpServer(
@@ -62,7 +88,74 @@ export function createMcpServer(
     );
   }
 
+  registerAssetResource(server, dependencies);
+
   return server;
+}
+
+function registerAssetResource(server: McpServer, dependencies: SystemToolDependencies): void {
+  server.registerResource(
+    "asset",
+    new ResourceTemplate("comfymcp://assets/{asset_id}", {
+      list: undefined
+    }),
+    {
+      title: "ComfyMCP Asset",
+      description: "Durable metadata and provenance for a generated ComfyMCP asset.",
+      mimeType: "application/json"
+    },
+    (uri) => readAssetResource(dependencies, uri)
+  );
+}
+
+function readAssetResource(dependencies: SystemToolDependencies, uri: URL): ReadResourceResult {
+  if (!dependencies.assets) {
+    throw new McpError(McpErrorCode.InvalidParams, "Persistent asset storage is not configured");
+  }
+  const assetId = assetIdFromUri(uri);
+  if (!assetId) {
+    throw new McpError(McpErrorCode.InvalidParams, `Resource ${uri.toString()} is not an asset URI`);
+  }
+  const asset = dependencies.assets.findById(assetId);
+  if (!asset) {
+    throw new McpError(McpErrorCode.InvalidParams, `Asset ${assetId} not found`);
+  }
+  return {
+    contents: [
+      {
+        uri: asset.resourceUri,
+        mimeType: "application/json",
+        text: JSON.stringify(
+          {
+            asset: {
+              asset_id: asset.assetId,
+              job_id: asset.jobId,
+              prompt_id: asset.promptId,
+              node_id: asset.nodeId,
+              kind: asset.kind,
+              mime_type: asset.mimeType,
+              comfyui_filename: asset.comfyuiFilename,
+              subfolder: asset.subfolder,
+              storage_type: asset.storageType,
+              resource_uri: asset.resourceUri,
+              metadata: asset.metadata,
+              created_at: asset.createdAt
+            }
+          },
+          null,
+          2
+        )
+      }
+    ]
+  };
+}
+
+function assetIdFromUri(uri: URL): string | undefined {
+  if (uri.protocol !== "comfymcp:" || uri.hostname !== "assets") {
+    return undefined;
+  }
+  const assetId = decodeURIComponent(uri.pathname.replace(/^\//, ""));
+  return assetId.length > 0 ? assetId : undefined;
 }
 
 async function callTool(
@@ -84,8 +177,12 @@ async function callTool(
       return workflowsValidateResult(args);
     case "workflows_run":
       return workflowsRunResult(config, dependencies, args);
+    case "jobs_list":
+      return jobsListResult(dependencies, args);
     case "jobs_get":
       return jobsGetResult(dependencies, args);
+    case "jobs_cancel":
+      return jobsCancelResult(config, dependencies, args);
     default:
       return errorResult(
         "CAPABILITY_UNAVAILABLE",
@@ -118,11 +215,11 @@ function workflowsValidateResult(args: unknown): CallToolResult {
   );
 }
 
-async function workflowsRunResult(
+function workflowsRunResult(
   config: ComfyMcpConfig,
   dependencies: SystemToolDependencies,
   args: unknown
-): Promise<CallToolResult> {
+): CallToolResult {
   if (!dependencies.jobs || !dependencies.assets) {
     return errorResult("CAPABILITY_UNAVAILABLE", "Persistent job storage is not configured");
   }
@@ -151,69 +248,40 @@ async function workflowsRunResult(
   });
 
   const rest = dependencies.comfyRestClient ?? new ComfyRestClient(config);
-  try {
-    const prompt = await rest.postPrompt(graphResult.apiGraph, "comfymcp-local");
-    const history = await rest.getHistory(prompt.prompt_id);
-    const assets = registerAssetsFromHistory(dependencies.assets, {
-      jobId: job.jobId,
-      promptId: prompt.prompt_id,
-      history
-    });
-    const updatedJob =
-      dependencies.jobs.update({
-        jobId: job.jobId,
-        state: "succeeded",
-        promptId: prompt.prompt_id,
-        result: {
-          prompt_id: prompt.prompt_id,
-          assets: assets.map((asset) => ({
-            asset_id: asset.assetId,
-            resource_uri: asset.resourceUri,
-            node_id: asset.nodeId,
-            kind: asset.kind
-          }))
-        }
-      }) ?? job;
+  new WorkflowJobRunner({
+    config,
+    jobs: dependencies.jobs,
+    assets: dependencies.assets,
+    rest,
+    options: dependencies.jobRunnerOptions
+  }).startWorkflowJob({
+    job,
+    apiGraph: graphResult.apiGraph
+  });
 
-    return structuredResult(
-      okEnvelope(requestId(), "Workflow queued locally", {
-        job: {
-          job_id: updatedJob.jobId,
-          kind: updatedJob.kind,
-          state: updatedJob.state,
-          prompt_id: updatedJob.promptId,
-          resource_uri: `comfymcp://jobs/${updatedJob.jobId}`
-        },
-        assets: assets.map((asset) => ({
-          asset_id: asset.assetId,
-          resource_uri: asset.resourceUri,
-          kind: asset.kind
-        }))
-      })
-    );
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Workflow execution failed";
-    const updatedJob =
-      dependencies.jobs.update({
-        jobId: job.jobId,
-        state: "failed",
-        error: {
-          code: mapComfyErrorCode(error),
-          message
-        }
-      }) ?? job;
-    return structuredResult(
-      okEnvelope(requestId(), "Workflow job failed after creation", {
-        job: {
-          job_id: updatedJob.jobId,
-          kind: updatedJob.kind,
-          state: updatedJob.state,
-          resource_uri: `comfymcp://jobs/${updatedJob.jobId}`
-        },
-        error: updatedJob.error
-      })
-    );
+  return structuredResult(
+    okEnvelope(requestId(), "Workflow queued locally", {
+      job: jobSummary(job),
+      assets: []
+    })
+  );
+}
+
+function jobsListResult(dependencies: SystemToolDependencies, args: unknown): CallToolResult {
+  if (!dependencies.jobs) {
+    return errorResult("CAPABILITY_UNAVAILABLE", "Persistent job storage is not configured");
   }
+  const parsed = jobsListInputSchema.safeParse(args);
+  if (!parsed.success) {
+    return errorResult("INVALID_WORKFLOW", "Invalid jobs_list input");
+  }
+  const result = dependencies.jobs.list(parsed.data);
+  return structuredResult(
+    okEnvelope(requestId(), "Jobs listed", {
+      jobs: result.jobs.map(jobSummary),
+      next_cursor: result.nextCursor
+    })
+  );
 }
 
 function jobsGetResult(dependencies: SystemToolDependencies, args: unknown): CallToolResult {
@@ -231,17 +299,7 @@ function jobsGetResult(dependencies: SystemToolDependencies, args: unknown): Cal
   const assets = dependencies.assets.listByJobId(job.jobId);
   return structuredResult(
     okEnvelope(requestId(), "Job status reported", {
-      job: {
-        job_id: job.jobId,
-        kind: job.kind,
-        state: job.state,
-        prompt_id: job.promptId,
-        resource_uri: `comfymcp://jobs/${job.jobId}`,
-        result: job.result,
-        error: job.error,
-        created_at: job.createdAt,
-        updated_at: job.updatedAt
-      },
+      job: jobSummary(job),
       assets: assets.map((asset) => ({
         asset_id: asset.assetId,
         resource_uri: asset.resourceUri,
@@ -251,6 +309,57 @@ function jobsGetResult(dependencies: SystemToolDependencies, args: unknown): Cal
       }))
     })
   );
+}
+
+async function jobsCancelResult(
+  config: ComfyMcpConfig,
+  dependencies: SystemToolDependencies,
+  args: unknown
+): Promise<CallToolResult> {
+  if (!dependencies.jobs) {
+    return errorResult("CAPABILITY_UNAVAILABLE", "Persistent job storage is not configured");
+  }
+  const parsed = jobsCancelInputSchema.safeParse(args);
+  if (!parsed.success) {
+    return errorResult("NOT_FOUND", "jobs_cancel requires a job_id");
+  }
+
+  const existing = dependencies.jobs.findById(parsed.data.job_id);
+  if (!existing) {
+    return errorResult("NOT_FOUND", "Job not found");
+  }
+
+  const warnings: string[] = [];
+  if (existing.promptId) {
+    const rest = dependencies.comfyRestClient ?? new ComfyRestClient(config);
+    try {
+      await rest.deletePrompt(existing.promptId);
+      await rest.interrupt();
+    } catch (error) {
+      warnings.push(error instanceof Error ? error.message : "ComfyUI cancellation request failed");
+    }
+  }
+
+  const cancelled = dependencies.jobs.cancel(existing.jobId) ?? existing;
+  const content = okEnvelope(requestId(), "Job cancellation requested", {
+    job: jobSummary(cancelled)
+  });
+  content.warnings.push(...warnings);
+  return structuredResult(content);
+}
+
+function jobSummary(job: JobRecord): Record<string, unknown> {
+  return {
+    job_id: job.jobId,
+    kind: job.kind,
+    state: job.state,
+    prompt_id: job.promptId,
+    resource_uri: `comfymcp://jobs/${job.jobId}`,
+    result: job.result,
+    error: job.error,
+    created_at: job.createdAt,
+    updated_at: job.updatedAt
+  };
 }
 
 async function systemStatusResult(
@@ -288,8 +397,14 @@ function inputSchemaFor(definition: ToolDefinition): z.ZodTypeAny | undefined {
   if (definition.name === "workflows_run") {
     return workflowRunInputSchema;
   }
+  if (definition.name === "jobs_list") {
+    return jobsListInputSchema;
+  }
   if (definition.name === "jobs_get") {
     return jobsGetInputSchema;
+  }
+  if (definition.name === "jobs_cancel") {
+    return jobsCancelInputSchema;
   }
   return undefined;
 }
@@ -372,54 +487,6 @@ function apiGraphFromRunInput(
     ok: false,
     message: "Registered workflow execution is not implemented yet"
   };
-}
-
-function registerAssetsFromHistory(
-  assets: AssetRepository,
-  input: { jobId: string; promptId: string; history: Record<string, unknown> }
-): ReturnType<AssetRepository["listByJobId"]> {
-  const promptHistory = recordAt(input.history, input.promptId);
-  const outputs = recordAt(promptHistory, "outputs");
-
-  for (const [nodeId, output] of Object.entries(outputs)) {
-    const outputRecord = asRecord(output);
-    for (const image of arrayAt(outputRecord, "images")) {
-      const imageRecord = asRecord(image);
-      assets.create({
-        jobId: input.jobId,
-        promptId: input.promptId,
-        nodeId,
-        kind: "image",
-        mimeType: "image/png",
-        comfyuiFilename: stringAt(imageRecord, "filename"),
-        subfolder: stringAt(imageRecord, "subfolder"),
-        storageType: stringAt(imageRecord, "type"),
-        metadata: imageRecord
-      });
-    }
-  }
-
-  return assets.listByJobId(input.jobId);
-}
-
-function recordAt(record: Record<string, unknown>, key: string): Record<string, unknown> {
-  return asRecord(record[key]);
-}
-
-function arrayAt(record: Record<string, unknown>, key: string): unknown[] {
-  const value = record[key];
-  return Array.isArray(value) ? value : [];
-}
-
-function stringAt(record: Record<string, unknown>, key: string): string | undefined {
-  const value = record[key];
-  return typeof value === "string" ? value : undefined;
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
 }
 
 function annotationsFor(definition: ToolDefinition): ToolAnnotations {

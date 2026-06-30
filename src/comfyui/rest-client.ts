@@ -43,6 +43,14 @@ export class ComfyRestClient {
     return this.getJson<ComfyHistoryResponse>(path, signal);
   }
 
+  async deletePrompt(promptId: string, signal?: AbortSignal): Promise<unknown> {
+    return this.postJson("/queue", { delete: [promptId] }, signal);
+  }
+
+  async interrupt(signal?: AbortSignal): Promise<unknown> {
+    return this.postJson("/interrupt", {}, signal);
+  }
+
   async clearVram(signal?: AbortSignal): Promise<unknown> {
     return this.postJson("/free", { unload_models: true, free_memory: true }, signal);
   }
