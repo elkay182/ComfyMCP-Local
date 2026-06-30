@@ -89,6 +89,18 @@ export const ALL_TOOLS: readonly ToolDefinition[] = [
   })
 ];
 
+const IMPLEMENTED_TOOL_NAMES = new Set([
+  "system_status",
+  "system_capabilities",
+  "system_logs",
+  "system_clear_vram",
+  "workflows_validate",
+  "workflows_run",
+  "jobs_list",
+  "jobs_get",
+  "jobs_cancel"
+]);
+
 export function listTools(
   config: ComfyMcpConfig,
   options: ToolInventoryOptions = {}
@@ -119,6 +131,9 @@ function isToolAvailable(
 }
 
 function omissionReason(config: ComfyMcpConfig, definition: ToolDefinition): string | undefined {
+  if (!IMPLEMENTED_TOOL_NAMES.has(definition.name)) {
+    return "not_implemented";
+  }
   if (definition.requiresAdminEnabled || requiresAdministrativeEnablement(definition.mutationClass)) {
     if (!config.adminMutations) {
       return "administrative_mutations_disabled";

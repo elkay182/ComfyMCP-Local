@@ -25,6 +25,7 @@
     "check": "npm run typecheck && npm run lint && npm test",
     "clean": "node scripts/clean.mjs",
     "lint": "eslint .",
+    "smoke:real": "node scripts/real-smoke.mjs",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

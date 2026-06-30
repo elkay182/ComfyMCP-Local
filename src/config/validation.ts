@@ -1,18 +1,16 @@
 import { type ComfyMcpConfig, ConfigError } from "./schema.js";
+import { validateComfyUpstreamStartup } from "../policy/comfy-upstream-policy.js";
 import {
   classifyIpAddress,
   isLoopbackAddress,
   isPrivateLanAddress,
-  isWildcardAddress,
-  isLoopbackUrl
+  isWildcardAddress
 } from "../policy/network-policy.js";
 
 export function validateStartupConfig(config: ComfyMcpConfig, activeBearerRecords = 0): void {
   const issues: string[] = [];
 
-  if (!isLoopbackUrl(config.comfyuiUrl)) {
-    issues.push("COMFYMCP_COMFYUI_URL must be an exact loopback origin");
-  }
+  validateComfyUpstreamStartup(config, issues);
   if (config.comfyuiUrl.username || config.comfyuiUrl.password) {
     issues.push("COMFYMCP_COMFYUI_URL must not contain credentials");
   }

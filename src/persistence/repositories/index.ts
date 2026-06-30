@@ -11,6 +11,7 @@ export {
   JOB_STATES,
   JobRepository,
   isActiveJobState,
+  type JobCreateResult,
   type JobListResult,
   type JobRecord,
   type JobState

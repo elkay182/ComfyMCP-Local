@@ -25,6 +25,8 @@ export type LimitsConfig = {
   workflowExecutionTimeoutMs: number;
   downloadRetryCount: number;
   planLifetimeMs: number;
+  comfyuiRequestTimeoutMs: number;
+  auditRetentionDays: number;
   maxInlineUploadBytes: number;
   maxResourceBytes: number;
   uploadStagingBytes: number;
@@ -61,6 +63,8 @@ export type ComfyMcpConfig = {
   transport: Transport;
   deploymentMode: DeploymentMode;
   comfyuiUrl: URL;
+  allowLanComfyUi: boolean;
+  comfyuiAllowedHosts: string[];
   comfyuiPath?: string;
   stateDir?: string;
   workflowRoot?: string;
@@ -97,6 +101,8 @@ export const DEFAULT_LIMITS: LimitsConfig = {
   workflowExecutionTimeoutMs: 60 * 60 * 1_000,
   downloadRetryCount: 4,
   planLifetimeMs: 30 * 60 * 1_000,
+  comfyuiRequestTimeoutMs: 30_000,
+  auditRetentionDays: 30,
   maxInlineUploadBytes: 16 * 1024 * 1024,
   maxResourceBytes: 16 * 1024 * 1024,
   uploadStagingBytes: 20 * 1024 * 1024 * 1024,
@@ -157,6 +163,8 @@ export function parseEnv(env: NodeJS.ProcessEnv): ComfyMcpConfig {
     transport,
     deploymentMode,
     comfyuiUrl,
+    allowLanComfyUi: parseBool(env.COMFYMCP_ALLOW_LAN_COMFYUI, false),
+    comfyuiAllowedHosts: parseList(env.COMFYMCP_COMFYUI_ALLOWED_HOSTS),
     comfyuiPath: env.COMFYMCP_COMFYUI_PATH,
     stateDir: env.COMFYMCP_STATE_DIR,
     workflowRoot: env.COMFYMCP_WORKFLOW_ROOT,
@@ -220,6 +228,18 @@ export function parseEnv(env: NodeJS.ProcessEnv): ComfyMcpConfig {
         env.COMFYMCP_DOWNLOAD_CACHE_GIB,
         DEFAULT_LIMITS.downloadCacheBytes,
         "COMFYMCP_DOWNLOAD_CACHE_GIB",
+        issues
+      ),
+      comfyuiRequestTimeoutMs: parsePositiveInt(
+        env.COMFYMCP_COMFYUI_REQUEST_TIMEOUT_MS,
+        DEFAULT_LIMITS.comfyuiRequestTimeoutMs,
+        "COMFYMCP_COMFYUI_REQUEST_TIMEOUT_MS",
+        issues
+      ),
+      auditRetentionDays: parsePositiveInt(
+        env.COMFYMCP_AUDIT_RETENTION_DAYS,
+        DEFAULT_LIMITS.auditRetentionDays,
+        "COMFYMCP_AUDIT_RETENTION_DAYS",
         issues
       )
     },

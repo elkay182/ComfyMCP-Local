@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import type Database from "better-sqlite3";
+import { redactSecrets } from "../../transport/http-auth.js";
 
 export type AuditEventInput = {
   actorId?: string;
@@ -98,7 +99,7 @@ export class AuditEventRepository {
         action: input.action,
         plan_id: input.planId ?? null,
         outcome: input.outcome,
-        details_json: JSON.stringify(input.details ?? {})
+        details_json: JSON.stringify(redactDetails(input.details ?? {}))
       });
 
     return Number(result.lastInsertRowid);
@@ -128,6 +129,13 @@ export class AuditEventRepository {
       .all(limit)
       .map(rowToRecord);
   }
+
+  pruneOlderThan(cutoff: Date): number {
+    const result = this.#db
+      .prepare<[string]>("DELETE FROM audit_events WHERE occurred_at < ?")
+      .run(cutoff.toISOString());
+    return result.changes;
+  }
 }
 
 function rowToRecord(row: AuditEventRow): AuditEventRecord {
@@ -153,4 +161,19 @@ function rowToRecord(row: AuditEventRow): AuditEventRecord {
 
 function hashIdentifier(value: string): string {
   return crypto.createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function redactDetails(value: unknown): unknown {
+  if (typeof value === "string") {
+    return redactSecrets(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map(redactDetails);
+  }
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, redactDetails(entry)])
+    );
+  }
+  return value;
 }

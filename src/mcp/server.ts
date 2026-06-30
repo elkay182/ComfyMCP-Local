@@ -13,7 +13,7 @@ import { ComfyRestClient } from "../comfyui/rest-client.js";
 import { ComfyUiError } from "../comfyui/errors.js";
 import type { MutationClass } from "../policy/authorization.js";
 import { decideWorkflowPolicy } from "../policy/workflow-policy.js";
-import type { AssetRepository } from "../persistence/repositories/asset-repository.js";
+import type { AssetRecord, AssetRepository } from "../persistence/repositories/asset-repository.js";
 import {
   JOB_STATES,
   type JobRecord,
@@ -88,12 +88,16 @@ export function createMcpServer(
     );
   }
 
-  registerAssetResource(server, dependencies);
+  registerAssetResource(config, server, dependencies);
 
   return server;
 }
 
-function registerAssetResource(server: McpServer, dependencies: SystemToolDependencies): void {
+function registerAssetResource(
+  config: ComfyMcpConfig,
+  server: McpServer,
+  dependencies: SystemToolDependencies
+): void {
   server.registerResource(
     "asset",
     new ResourceTemplate("comfymcp://assets/{asset_id}", {
@@ -104,11 +108,15 @@ function registerAssetResource(server: McpServer, dependencies: SystemToolDepend
       description: "Durable metadata and provenance for a generated ComfyMCP asset.",
       mimeType: "application/json"
     },
-    (uri) => readAssetResource(dependencies, uri)
+    (uri) => readAssetResource(config, dependencies, uri)
   );
 }
 
-function readAssetResource(dependencies: SystemToolDependencies, uri: URL): ReadResourceResult {
+async function readAssetResource(
+  config: ComfyMcpConfig,
+  dependencies: SystemToolDependencies,
+  uri: URL
+): Promise<ReadResourceResult> {
   if (!dependencies.assets) {
     throw new McpError(McpErrorCode.InvalidParams, "Persistent asset storage is not configured");
   }
@@ -120,33 +128,63 @@ function readAssetResource(dependencies: SystemToolDependencies, uri: URL): Read
   if (!asset) {
     throw new McpError(McpErrorCode.InvalidParams, `Asset ${assetId} not found`);
   }
-  return {
-    contents: [
+  const metadataContent = {
+    uri: `${asset.resourceUri}#metadata`,
+    mimeType: "application/json",
+    text: JSON.stringify(
       {
-        uri: asset.resourceUri,
-        mimeType: "application/json",
-        text: JSON.stringify(
-          {
-            asset: {
-              asset_id: asset.assetId,
-              job_id: asset.jobId,
-              prompt_id: asset.promptId,
-              node_id: asset.nodeId,
-              kind: asset.kind,
-              mime_type: asset.mimeType,
-              comfyui_filename: asset.comfyuiFilename,
-              subfolder: asset.subfolder,
-              storage_type: asset.storageType,
-              resource_uri: asset.resourceUri,
-              metadata: asset.metadata,
-              created_at: asset.createdAt
-            }
-          },
-          null,
-          2
-        )
-      }
-    ]
+        asset: assetSummary(asset)
+      },
+      null,
+      2
+    )
+  };
+
+  if (!asset.comfyuiFilename) {
+    return {
+      contents: [metadataContent]
+    };
+  }
+
+  try {
+    const rest = dependencies.comfyRestClient ?? new ComfyRestClient(config);
+    const content = await rest.getViewBytes({
+      filename: asset.comfyuiFilename,
+      subfolder: asset.subfolder,
+      type: asset.storageType
+    });
+    return {
+      contents: [
+        {
+          uri: asset.resourceUri,
+          mimeType: content.mimeType ?? asset.mimeType,
+          blob: content.bytes.toString("base64")
+        },
+        metadataContent
+      ]
+    };
+  } catch (error) {
+    throw new McpError(
+      McpErrorCode.InvalidParams,
+      error instanceof Error ? error.message : `Asset ${assetId} content could not be read`
+    );
+  }
+}
+
+function assetSummary(asset: AssetRecord): Record<string, unknown> {
+  return {
+    asset_id: asset.assetId,
+    job_id: asset.jobId,
+    prompt_id: asset.promptId,
+    node_id: asset.nodeId,
+    kind: asset.kind,
+    mime_type: asset.mimeType,
+    comfyui_filename: asset.comfyuiFilename,
+    subfolder: asset.subfolder,
+    storage_type: asset.storageType,
+    resource_uri: asset.resourceUri,
+    metadata: asset.metadata,
+    created_at: asset.createdAt
   };
 }
 
@@ -239,30 +277,36 @@ function workflowsRunResult(
     return errorResult("POLICY_VIOLATION", policy.message);
   }
 
-  const job = dependencies.jobs.create({
-    actorId: dependencies.actorId ?? "local_stdio",
+  const actorId = dependencies.actorId ?? "local_stdio";
+  const jobResult = dependencies.jobs.createOrFind({
+    actorId,
     kind: "generation",
     workflowId: graphResult.workflowId,
     idempotencyKey: parsed.data.idempotency_key,
     request: parsed.data
   });
+  const job = jobResult.job;
 
-  const rest = dependencies.comfyRestClient ?? new ComfyRestClient(config);
-  new WorkflowJobRunner({
-    config,
-    jobs: dependencies.jobs,
-    assets: dependencies.assets,
-    rest,
-    options: dependencies.jobRunnerOptions
-  }).startWorkflowJob({
-    job,
-    apiGraph: graphResult.apiGraph
-  });
+  if (jobResult.created) {
+    const rest = dependencies.comfyRestClient ?? new ComfyRestClient(config);
+    WorkflowJobRunner.shared({
+      config,
+      jobs: dependencies.jobs,
+      assets: dependencies.assets,
+      rest,
+      options: dependencies.jobRunnerOptions
+    }).startWorkflowJob({
+      job,
+      apiGraph: graphResult.apiGraph
+    });
+  }
+
+  const assets = dependencies.assets.listByJobId(job.jobId);
 
   return structuredResult(
-    okEnvelope(requestId(), "Workflow queued locally", {
+    okEnvelope(requestId(), jobResult.created ? "Workflow queued locally" : "Idempotent workflow job replayed", {
       job: jobSummary(job),
-      assets: []
+      assets: assets.map(assetSummary)
     })
   );
 }
@@ -300,13 +344,7 @@ function jobsGetResult(dependencies: SystemToolDependencies, args: unknown): Cal
   return structuredResult(
     okEnvelope(requestId(), "Job status reported", {
       job: jobSummary(job),
-      assets: assets.map((asset) => ({
-        asset_id: asset.assetId,
-        resource_uri: asset.resourceUri,
-        node_id: asset.nodeId,
-        kind: asset.kind,
-        mime_type: asset.mimeType
-      }))
+      assets: assets.map(assetSummary)
     })
   );
 }

@@ -130,6 +130,65 @@ describe("Streamable HTTP MCP transport", () => {
     });
     expect(server.activeSessionCount()).toBe(0);
   });
+
+  it("rate-limits admitted HTTP request volume before MCP dispatch", async () => {
+    const port = await getFreePort();
+    const stateDir = tempStateDir();
+    createStoredBearer(stateDir);
+    const config = streamableConfig(port, stateDir, {
+      rateLimitPerMinute: "1"
+    });
+    const server = await startStreamableHttpServer(config, { stateDir });
+    httpServers.push(server);
+
+    const first = await rawPost(port, {
+      Host: `127.0.0.1:${port}`
+    });
+    const second = await rawPost(port, {
+      Host: `127.0.0.1:${port}`
+    });
+
+    expect(first.status).toBe(401);
+    expect(second).toMatchObject({
+      status: 429,
+      body: {
+        ok: false,
+        error: {
+          code: "RATE_LIMITED"
+        }
+      }
+    });
+  });
+
+  it("rate-limits repeated authentication failures", async () => {
+    const port = await getFreePort();
+    const stateDir = tempStateDir();
+    createStoredBearer(stateDir);
+    const config = streamableConfig(port, stateDir, {
+      authFailuresPerMinute: "1",
+      rateLimitPerMinute: "20"
+    });
+    const server = await startStreamableHttpServer(config, { stateDir });
+    httpServers.push(server);
+
+    const first = await rawPost(port, {
+      Host: `127.0.0.1:${port}`
+    });
+    const second = await rawPost(port, {
+      Host: `127.0.0.1:${port}`
+    });
+
+    expect(first.status).toBe(401);
+    expect(second).toMatchObject({
+      status: 429,
+      body: {
+        ok: false,
+        error: {
+          code: "RATE_LIMITED"
+        }
+      }
+    });
+  });
 });
 
 async function connectInMemory(server: McpServer): Promise<Client> {
@@ -168,7 +227,7 @@ async function connectHttp(
 function streamableConfig(
   port: number,
   stateDir: string,
-  overrides: { allowedClientCidrs?: string } = {}
+  overrides: { allowedClientCidrs?: string; rateLimitPerMinute?: string; authFailuresPerMinute?: string } = {}
 ): ComfyMcpConfig {
   return parseEnv({
     COMFYMCP_TRANSPORT: "streamable_http",
@@ -179,6 +238,8 @@ function streamableConfig(
     COMFYMCP_HTTP_ALLOWED_CLIENT_CIDRS: overrides.allowedClientCidrs ?? "127.0.0.1/32",
     COMFYMCP_HTTP_ALLOWED_HOSTS: `127.0.0.1:${port}`,
     COMFYMCP_HTTP_TRUSTED_PROXY_CIDRS: "127.0.0.1/32",
+    COMFYMCP_HTTP_RATE_LIMIT_PER_MINUTE: overrides.rateLimitPerMinute ?? "120",
+    COMFYMCP_HTTP_AUTH_FAILURES_PER_MINUTE: overrides.authFailuresPerMinute ?? "10",
     COMFYMCP_COMFYUI_PATH: "/tmp/ComfyUI",
     COMFYMCP_EXPORT_ROOT: "/tmp/exports",
     COMFYMCP_STATE_DIR: stateDir

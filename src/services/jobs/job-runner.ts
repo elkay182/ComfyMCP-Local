@@ -13,12 +13,14 @@ import {
 } from "../../persistence/repositories/index.js";
 import { analyzePromptHistory, registerAssetsFromHistory } from "./history.js";
 
+const sharedRunners = new WeakMap<JobRepository, WorkflowJobRunner>();
+
 export type WorkflowJobRunnerOptions = {
   clientIdPrefix?: string;
   pollIntervalMs?: number;
   websocketTimeoutMs?: number;
   executionTimeoutMs?: number;
-  websocketFactory?: (config: ComfyMcpConfig, clientId: string) => ComfyWsClient;
+  websocketFactory?: (config: ComfyMcpConfig, clientId: string) => Promise<ComfyWsClient>;
 };
 
 export type WorkflowJobRunnerDependencies = {
@@ -34,8 +36,9 @@ export class WorkflowJobRunner {
   readonly #jobs: JobRepository;
   readonly #assets: AssetRepository;
   readonly #rest: ComfyRestClient;
+  readonly #activeJobIds = new Set<string>();
   readonly #options: Required<Omit<WorkflowJobRunnerOptions, "websocketFactory">> & {
-    websocketFactory: (config: ComfyMcpConfig, clientId: string) => ComfyWsClient;
+    websocketFactory: (config: ComfyMcpConfig, clientId: string) => Promise<ComfyWsClient>;
   };
 
   constructor(dependencies: WorkflowJobRunnerDependencies) {
@@ -53,9 +56,25 @@ export class WorkflowJobRunner {
     };
   }
 
+  static shared(dependencies: WorkflowJobRunnerDependencies): WorkflowJobRunner {
+    const existing = sharedRunners.get(dependencies.jobs);
+    if (existing) {
+      return existing;
+    }
+    const runner = new WorkflowJobRunner(dependencies);
+    sharedRunners.set(dependencies.jobs, runner);
+    return runner;
+  }
+
   startWorkflowJob(input: { job: JobRecord; apiGraph: Record<string, unknown> }): void {
+    if (this.#activeJobIds.has(input.job.jobId)) {
+      return;
+    }
+    this.#activeJobIds.add(input.job.jobId);
     void this.runWorkflowJob(input).catch((error: unknown) => {
       this.failJob(input.job.jobId, error);
+    }).finally(() => {
+      this.#activeJobIds.delete(input.job.jobId);
     });
   }
 
@@ -65,7 +84,7 @@ export class WorkflowJobRunner {
     }
 
     const clientId = `${this.#options.clientIdPrefix}-${input.job.jobId}`;
-    const watcher = this.tryCreateWatcher(clientId);
+    const watcher = await this.tryCreateWatcher(clientId);
 
     try {
       this.#jobs.update({
@@ -73,7 +92,7 @@ export class WorkflowJobRunner {
         state: "running"
       });
 
-      const prompt = await this.#rest.postPrompt(input.apiGraph, clientId);
+      const prompt = await this.withRetry(() => this.#rest.postPrompt(input.apiGraph, clientId));
       if (!this.isActive(input.job.jobId)) {
         return;
       }
@@ -119,7 +138,7 @@ export class WorkflowJobRunner {
     }
 
     try {
-      const history = await this.#rest.getHistory(job.promptId);
+      const history = await this.withRetry(() => this.#rest.getHistory(job.promptId));
       const analysis = analyzePromptHistory(history, job.promptId);
       if (analysis.state === "pending") {
         this.#jobs.update({
@@ -149,7 +168,7 @@ export class WorkflowJobRunner {
     let lastHistory: Record<string, unknown> = {};
 
     while (Date.now() <= deadline) {
-      const history = await this.#rest.getHistory(promptId);
+      const history = await this.withRetry(() => this.#rest.getHistory(promptId));
       lastHistory = history;
       if (analyzePromptHistory(history, promptId).state !== "pending") {
         return history;
@@ -183,7 +202,7 @@ export class WorkflowJobRunner {
     signal: Extract<ComfyWsPromptResult, { state: "failed" }>
   ): Promise<Record<string, unknown>> {
     try {
-      const history = await this.#rest.getHistory(promptId);
+      const history = await this.withRetry(() => this.#rest.getHistory(promptId));
       if (analyzePromptHistory(history, promptId).state !== "pending") {
         return history;
       }
@@ -255,9 +274,9 @@ export class WorkflowJobRunner {
     });
   }
 
-  private tryCreateWatcher(clientId: string): ComfyWsClient | undefined {
+  private async tryCreateWatcher(clientId: string): Promise<ComfyWsClient | undefined> {
     try {
-      return this.#options.websocketFactory(this.#config, clientId);
+      return await this.#options.websocketFactory(this.#config, clientId);
     } catch {
       return undefined;
     }
@@ -295,15 +314,32 @@ export class WorkflowJobRunner {
       error: errorRecord("INTERNAL", error, "Workflow execution failed")
     });
   }
+
+  private async withRetry<T>(operation: () => Promise<T>): Promise<T> {
+    let lastError: unknown;
+    const attempts = Math.max(1, this.#config.limits.downloadRetryCount + 1);
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        return await operation();
+      } catch (error) {
+        lastError = error;
+        if (attempt === attempts - 1) {
+          break;
+        }
+        await sleep(Math.min(1_000, 50 * 2 ** attempt));
+      }
+    }
+    throw lastError;
+  }
 }
 
 export function startJobReconciliation(dependencies: WorkflowJobRunnerDependencies): void {
-  const runner = new WorkflowJobRunner(dependencies);
+  const runner = WorkflowJobRunner.shared(dependencies);
   void runner.reconcileUnfinishedJobs().catch(() => undefined);
 }
 
 export async function reconcileUnfinishedJobs(dependencies: WorkflowJobRunnerDependencies): Promise<void> {
-  await new WorkflowJobRunner(dependencies).reconcileUnfinishedJobs();
+  await WorkflowJobRunner.shared(dependencies).reconcileUnfinishedJobs();
 }
 
 function sleep(milliseconds: number): Promise<void> {

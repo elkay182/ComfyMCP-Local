@@ -1,4 +1,5 @@
 import type { ComfyMcpConfig } from "../config/schema.js";
+import { assertComfyUpstreamAllowed } from "../policy/comfy-upstream-policy.js";
 import { resolveComfyUrl } from "../transport/origin-policy.js";
 
 export type ComfyWsEvent =
@@ -17,8 +18,10 @@ export type ComfyWsClient = {
   close(): void;
 };
 
-export function createWebSocketClient(config: ComfyMcpConfig, clientId: string): ComfyWsClient {
-  return new GlobalWebSocketClient(webSocketUrl(config, clientId));
+export async function createWebSocketClient(config: ComfyMcpConfig, clientId: string): Promise<ComfyWsClient> {
+  const httpUrl = resolveComfyUrl(config, `/ws?clientId=${encodeURIComponent(clientId)}`);
+  await assertComfyUpstreamAllowed(config, httpUrl);
+  return new GlobalWebSocketClient(webSocketUrl(httpUrl));
 }
 
 class GlobalWebSocketClient implements ComfyWsClient {
@@ -88,8 +91,8 @@ class GlobalWebSocketClient implements ComfyWsClient {
   }
 }
 
-function webSocketUrl(config: ComfyMcpConfig, clientId: string): URL {
-  const url = resolveComfyUrl(config, `/ws?clientId=${encodeURIComponent(clientId)}`);
+function webSocketUrl(httpUrl: URL): URL {
+  const url = new URL(httpUrl);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url;
 }

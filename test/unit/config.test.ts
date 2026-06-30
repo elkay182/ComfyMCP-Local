@@ -18,6 +18,59 @@ describe("configuration", () => {
     });
 
     expect(() => validateStartupConfig(config)).toThrow(ConfigError);
+    expect(() => validateStartupConfig(config)).toThrow(/COMFYMCP_ALLOW_LAN_COMFYUI=true/);
+  });
+
+  it("accepts explicit HTTPS LAN ComfyUI upstreams", () => {
+    const config = parseEnv({
+      COMFYMCP_COMFYUI_URL: "https://comfy-gpu.lan.example",
+      COMFYMCP_ALLOW_LAN_COMFYUI: "true",
+      COMFYMCP_COMFYUI_ALLOWED_HOSTS: "comfy-gpu.lan.example"
+    });
+
+    expect(config.allowLanComfyUi).toBe(true);
+    expect(config.comfyuiAllowedHosts).toEqual(["comfy-gpu.lan.example"]);
+    expect(() => validateStartupConfig(config)).not.toThrow();
+  });
+
+  it("rejects LAN ComfyUI upstreams without HTTPS and host allowlisting", () => {
+    const config = parseEnv({
+      COMFYMCP_COMFYUI_URL: "http://comfy-gpu.lan.example",
+      COMFYMCP_ALLOW_LAN_COMFYUI: "true"
+    });
+
+    expect(() => validateStartupConfig(config)).toThrow(/HTTPS/);
+    expect(() => validateStartupConfig(config)).toThrow(/COMFYMCP_COMFYUI_ALLOWED_HOSTS/);
+  });
+
+  it("rejects LAN ComfyUI upstreams when the configured host is not allowlisted", () => {
+    const config = parseEnv({
+      COMFYMCP_COMFYUI_URL: "https://comfy-gpu.lan.example",
+      COMFYMCP_ALLOW_LAN_COMFYUI: "true",
+      COMFYMCP_COMFYUI_ALLOWED_HOSTS: "other.lan.example"
+    });
+
+    expect(() => validateStartupConfig(config)).toThrow(/must include the configured ComfyUI host/);
+  });
+
+  it("accepts private LAN ComfyUI IP literals when explicitly allowlisted", () => {
+    const config = parseEnv({
+      COMFYMCP_COMFYUI_URL: "https://192.168.1.99:8188",
+      COMFYMCP_ALLOW_LAN_COMFYUI: "true",
+      COMFYMCP_COMFYUI_ALLOWED_HOSTS: "192.168.1.99:8188"
+    });
+
+    expect(() => validateStartupConfig(config)).not.toThrow();
+  });
+
+  it("rejects public ComfyUI IP literals even when LAN mode is enabled", () => {
+    const config = parseEnv({
+      COMFYMCP_COMFYUI_URL: "https://8.8.8.8",
+      COMFYMCP_ALLOW_LAN_COMFYUI: "true",
+      COMFYMCP_COMFYUI_ALLOWED_HOSTS: "8.8.8.8"
+    });
+
+    expect(() => validateStartupConfig(config)).toThrow(/private LAN/);
   });
 
   it("rejects dormant HTTP listener settings in stdio mode", () => {

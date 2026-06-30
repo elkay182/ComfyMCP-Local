@@ -174,8 +174,12 @@ async function route(
   }
 
   if (request.method === "GET" && url.pathname === "/view") {
-    response.writeHead(200, { "Content-Type": "image/png" });
-    response.end(Buffer.from([]));
+    const bytes = Buffer.from("fake-png-bytes", "utf8");
+    response.writeHead(200, {
+      "Content-Type": "image/png",
+      "Content-Length": String(bytes.byteLength)
+    });
+    response.end(bytes);
     return;
   }
 

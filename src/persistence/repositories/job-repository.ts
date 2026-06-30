@@ -53,6 +53,11 @@ export type JobListResult = {
   nextCursor?: string;
 };
 
+export type JobCreateResult = {
+  job: JobRecord;
+  created: boolean;
+};
+
 type JobRow = {
   job_id: string;
   actor_id: string;
@@ -138,6 +143,26 @@ export class JobRepository {
     return job;
   }
 
+  createOrFind(input: {
+    actorId: string;
+    kind: string;
+    workflowId?: string;
+    idempotencyKey: string;
+    request: Record<string, unknown>;
+  }): JobCreateResult {
+    const existing = this.findByActorAndIdempotencyKey(input.actorId, input.idempotencyKey);
+    if (existing) {
+      return {
+        job: existing,
+        created: false
+      };
+    }
+    return {
+      job: this.create(input),
+      created: true
+    };
+  }
+
   findById(jobId: string): JobRecord | undefined {
     const row = this.#db
       .prepare<[string], JobRow>(
@@ -149,6 +174,20 @@ export class JobRepository {
         `
       )
       .get(jobId);
+    return row ? rowToRecord(row) : undefined;
+  }
+
+  findByActorAndIdempotencyKey(actorId: string, idempotencyKey: string): JobRecord | undefined {
+    const row = this.#db
+      .prepare<[string, string], JobRow>(
+        `
+          SELECT job_id, actor_id, kind, state, workflow_id, prompt_id, idempotency_key,
+                 request_json, result_json, error_json, created_at, updated_at
+          FROM jobs
+          WHERE actor_id = ? AND idempotency_key = ?
+        `
+      )
+      .get(actorId, idempotencyKey);
     return row ? rowToRecord(row) : undefined;
   }
 

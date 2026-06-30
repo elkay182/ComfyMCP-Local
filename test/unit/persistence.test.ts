@@ -90,7 +90,7 @@ describe("SQLite persistence", () => {
       sessionIdHash: session.sessionHash,
       action: "auth.create",
       outcome: "succeeded",
-      details: { label: "lan-client" }
+      details: { label: "lan-client", header: `Authorization: Bearer ${created.plaintext}` }
     });
 
     expect(sessions.findOpenByHash(session.sessionHash)).toMatchObject({
@@ -104,9 +104,14 @@ describe("SQLite persistence", () => {
         transport: "streamable_http",
         action: "auth.create",
         outcome: "succeeded",
-        details: { label: "lan-client" }
+        details: { label: "lan-client", header: "Authorization: Bearer [REDACTED]" }
       })
     ]);
+    handle.db
+      .prepare("UPDATE audit_events SET occurred_at = ? WHERE action = ?")
+      .run("2000-01-01T00:00:00.000Z", "auth.create");
+    expect(audit.pruneOlderThan(new Date("2001-01-01T00:00:00.000Z"))).toBe(1);
+    expect(audit.list(1)).toEqual([]);
 
     handle.close();
   });

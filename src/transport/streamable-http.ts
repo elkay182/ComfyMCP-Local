@@ -20,6 +20,7 @@ import {
 import { startJobReconciliation } from "../services/jobs/job-runner.js";
 import { admissionFailureBody, admitHttpRequest } from "./http-admission.js";
 import { hashSessionId } from "./http-session.js";
+import { FixedWindowRateLimiter, type RateLimitResult } from "./rate-limit.js";
 import { loadTlsMaterial } from "./tls.js";
 
 export function assertStreamableHttpReady(config: ComfyMcpConfig, activeBearerRecords: number): void {
@@ -61,10 +62,16 @@ export async function startStreamableHttpServer(
   const jobs = new JobRepository(database.db);
   const assets = new AssetRepository(database.db);
   const comfyRestClient = new ComfyRestClient(config);
+  const requestRateLimiter = new FixedWindowRateLimiter(config.http.rateLimitPerMinute);
+  const authFailureRateLimiter = new FixedWindowRateLimiter(config.http.authFailuresPerMinute);
 
   if (!options.skipStartupValidation) {
     assertStreamableHttpReady(config, authTokens.countActive());
   }
+
+  auditEvents.pruneOlderThan(
+    new Date(Date.now() - config.limits.auditRetentionDays * 24 * 60 * 60 * 1_000)
+  );
 
   startJobReconciliation({
     config,
@@ -82,6 +89,8 @@ export async function startStreamableHttpServer(
       jobs,
       assets,
       comfyRestClient,
+      requestRateLimiter,
+      authFailureRateLimiter,
       runtimes
     });
   };
@@ -139,22 +148,37 @@ async function handleMcpHttpRequest(
     jobs: JobRepository;
     assets: AssetRepository;
     comfyRestClient: ComfyRestClient;
+    requestRateLimiter: FixedWindowRateLimiter;
+    authFailureRateLimiter: FixedWindowRateLimiter;
     runtimes: Map<string, SessionRuntime>;
   }
 ): Promise<void> {
   const method = request.method ?? "GET";
   const requestUrl = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
   const contentLength = parseContentLength(request.headers["content-length"]);
+  const remoteAddress = effectiveRemoteAddress(request);
+  const rateLimit = context.requestRateLimiter.consume(remoteAddress);
+  if (!rateLimit.ok) {
+    writeRateLimitFailure(response, rateLimit);
+    return;
+  }
   const admission = admitHttpRequest(config, {
     method,
     path: requestUrl.pathname,
     headers: normalizeHeaders(request),
-    remoteAddress: effectiveRemoteAddress(request),
+    remoteAddress,
     bodyBytes: contentLength,
     records: context.authTokens.listForVerification()
   });
 
   if (!admission.ok) {
+    if (admission.code === "UNAUTHENTICATED") {
+      const authLimit = context.authFailureRateLimiter.consume(remoteAddress);
+      if (!authLimit.ok) {
+        writeRateLimitFailure(response, authLimit);
+        return;
+      }
+    }
     writeAdmissionFailure(response, admission);
     return;
   }
@@ -380,6 +404,18 @@ function writeAdmissionFailure(
     response.setHeader(name, value);
   }
   writeJson(response, decision.status, admissionFailureBody(decision));
+}
+
+function writeRateLimitFailure(response: ServerResponse, limit: Extract<RateLimitResult, { ok: false }>): void {
+  response.setHeader("Retry-After", String(limit.retryAfterSeconds));
+  writeJson(response, 429, {
+    ok: false,
+    error: {
+      code: "RATE_LIMITED",
+      message: "Request was not admitted"
+    },
+    correlation_id: `req_${crypto.randomUUID().replaceAll("-", "").slice(0, 24)}`
+  });
 }
 
 function writePreflightResponse(

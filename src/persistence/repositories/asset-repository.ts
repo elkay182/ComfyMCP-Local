@@ -110,7 +110,7 @@ export class AssetRepository {
                  subfolder, storage_type, resource_uri, metadata_json, created_at
           FROM assets
           WHERE job_id = ?
-          ORDER BY created_at ASC, asset_id ASC
+          ORDER BY created_at ASC, rowid ASC
         `
       )
       .all(jobId)

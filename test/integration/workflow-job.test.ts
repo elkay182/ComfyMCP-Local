@@ -74,7 +74,7 @@ describe("workflow/job Milestone 1 core", () => {
     const resource = await client.readResource({
       uri: stringField(firstAsset, "resource_uri")
     });
-    const assetResource = structured(JSON.parse(firstResourceText(resource)) as unknown);
+    const assetResource = structured(JSON.parse(resourceTextAt(resource, 1)) as unknown);
     const listed = await client.callTool({
       name: "jobs_list",
       arguments: {
@@ -128,6 +128,7 @@ describe("workflow/job Milestone 1 core", () => {
         kind: "image"
       }
     });
+    expect(resourceBlobAt(resource, 0)).toBe(Buffer.from("fake-png-bytes", "utf8").toString("base64"));
     expect(listedJobs.some((listedJob) => stringField(structured(listedJob), "job_id") === jobId)).toBe(true);
   });
 
@@ -161,6 +162,47 @@ describe("workflow/job Milestone 1 core", () => {
         }
       },
       assets: []
+    });
+  });
+
+  it("replays duplicate workflows_run calls by idempotency key without starting a second job", async () => {
+    const { client } = await setupWorkflowClient();
+    const args = {
+      workflow: {
+        api_graph: {
+          "1": {
+            class_type: "SaveImage",
+            inputs: {}
+          }
+        }
+      },
+      inputs: {},
+      idempotency_key: "duplicate-run"
+    };
+
+    const first = await client.callTool({
+      name: "workflows_run",
+      arguments: args
+    });
+    const second = await client.callTool({
+      name: "workflows_run",
+      arguments: args
+    });
+    const firstJobId = stringField(structured(structured(first.structuredContent).job), "job_id");
+    const secondJobId = stringField(structured(structured(second.structuredContent).job), "job_id");
+    const completed = await waitForJobState(client, firstJobId, "succeeded");
+
+    expect(second.structuredContent).toMatchObject({
+      ok: true,
+      summary: "Idempotent workflow job replayed"
+    });
+    expect(secondJobId).toBe(firstJobId);
+    expect(completed).toMatchObject({
+      job: {
+        job_id: firstJobId,
+        prompt_id: "fake-prompt-1",
+        state: "succeeded"
+      }
     });
   });
 
@@ -370,12 +412,22 @@ function structuredArray(value: unknown): unknown[] {
   throw new Error("Expected structured array");
 }
 
-function firstResourceText(resource: unknown): string {
+function resourceTextAt(resource: unknown, index: number): string {
   const contents = structuredArray(structured(resource).contents);
-  const first = structured(contents[0]);
-  const text = first.text;
+  const content = structured(contents[index]);
+  const text = content.text;
   if (typeof text === "string") {
     return text;
   }
   throw new Error("Expected text resource content");
+}
+
+function resourceBlobAt(resource: unknown, index: number): string {
+  const contents = structuredArray(structured(resource).contents);
+  const content = structured(contents[index]);
+  const blob = content.blob;
+  if (typeof blob === "string") {
+    return blob;
+  }
+  throw new Error("Expected blob resource content");
 }

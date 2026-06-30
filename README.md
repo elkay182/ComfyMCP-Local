@@ -8,6 +8,18 @@ The project starts in disconnected/read-only `local_stdio` mode with no required
 environment variables. HTTP/LAN mode is intentionally fail-closed until TLS,
 bearer auth, exact Host admission, and client CIDRs are configured.
 
+By default the ComfyUI upstream must be loopback. To target an HTTPS ComfyUI
+server on your LAN, opt in explicitly and allowlist the exact upstream host:
+
+```sh
+COMFYMCP_COMFYUI_URL=https://comfy-gpu.lan.example
+COMFYMCP_ALLOW_LAN_COMFYUI=true
+COMFYMCP_COMFYUI_ALLOWED_HOSTS=comfy-gpu.lan.example
+```
+
+LAN upstreams require HTTPS, an origin-only URL, no embedded credentials, and
+DNS answers that stay inside private LAN address ranges.
+
 ```sh
 npm install
 npm run check

@@ -29,9 +29,9 @@ describe("SDK-backed MCP server", () => {
       name: "comfymcp-local",
       version: "0.1.0"
     });
-    expect(tools.tools).toHaveLength(33);
+    expect(tools.tools).toHaveLength(9);
     expect(tools.tools.map((tool) => tool.name)).toEqual(
-      expect.arrayContaining(["system_status", "system_capabilities", "assets_export"])
+      expect.arrayContaining(["system_status", "system_capabilities", "workflows_run"])
     );
     const statusTool = tools.tools.find((tool) => tool.name === "system_status");
     expect(statusTool?.description).toContain("Mutation class: read_only");
@@ -46,12 +46,7 @@ describe("SDK-backed MCP server", () => {
       idempotentHint: true,
       openWorldHint: false
     });
-    expect(tools.tools.find((tool) => tool.name === "models_search")).toMatchObject({
-      annotations: {
-        readOnlyHint: true,
-        openWorldHint: true
-      }
-    });
+    expect(tools.tools.map((tool) => tool.name)).not.toContain("models_search");
   });
 
   it("runs system_status and system_capabilities through tools/call", async () => {
@@ -94,7 +89,7 @@ describe("SDK-backed MCP server", () => {
     });
   });
 
-  it("runs the remaining implemented system tools and reports unsupported tools as structured errors", async () => {
+  it("runs the remaining implemented system tools and hides unsupported tools", async () => {
     const client = await connectClient(
       createMcpServer(parseEnv({}), {
         getLogs: () => ({
@@ -111,9 +106,7 @@ describe("SDK-backed MCP server", () => {
     const clearVram = await client.callTool({
       name: "system_clear_vram"
     });
-    const unsupported = await client.callTool({
-      name: "workflows_list"
-    });
+    const tools = await client.listTools();
 
     expect(logs.structuredContent).toMatchObject({
       ok: true,
@@ -128,15 +121,7 @@ describe("SDK-backed MCP server", () => {
         ok: true
       }
     });
-    expect(unsupported).toMatchObject({
-      isError: true,
-      structuredContent: {
-        ok: false,
-        error: {
-          code: "CAPABILITY_UNAVAILABLE"
-        }
-      }
-    });
+    expect(tools.tools.map((tool) => tool.name)).not.toContain("workflows_list");
   });
 });
 
