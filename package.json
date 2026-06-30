@@ -1,0 +1,43 @@
+{
+  "name": "comfymcp-local",
+  "version": "0.1.0",
+  "description": "Local-first MCP server for controlling a loopback-only ComfyUI instance.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "comfymcp-local": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "docs",
+    "model-packs",
+    "workflows",
+    "LICENSE",
+    "README.md",
+    "SECURITY.md",
+    "UPSTREAM.md"
+  ],
+  "engines": {
+    "node": ">=22 <27"
+  },
+  "scripts": {
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "check": "npm run typecheck && npm run lint && npm test",
+    "clean": "node scripts/clean.mjs",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.13.3",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.29.0",
+    "@types/node": "^22.15.34",
+    "eslint": "^9.29.0",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.35.0",
+    "vitest": "^3.2.4"
+  }
+}

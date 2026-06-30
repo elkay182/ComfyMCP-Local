@@ -1,0 +1,13 @@
+dist/
+node_modules/
+coverage/
+.DS_Store
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.env
+*.pem
+*.key
+*.crt
+comfymcp-state/
