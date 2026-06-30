@@ -119,7 +119,27 @@ async function route(
   if (request.method === "GET" && url.pathname.startsWith("/history/")) {
     const promptId = decodeURIComponent(url.pathname.slice("/history/".length));
     const prompt = prompts.get(promptId);
-    json(response, prompt ? { [promptId]: { status: { completed: true }, outputs: {} } } : {});
+    json(
+      response,
+      prompt
+        ? {
+            [promptId]: {
+              status: { completed: true },
+              outputs: {
+                "9": {
+                  images: [
+                    {
+                      filename: `${promptId}.png`,
+                      subfolder: "",
+                      type: "output"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        : {}
+    );
     return;
   }
 

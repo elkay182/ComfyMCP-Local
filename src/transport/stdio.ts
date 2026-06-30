@@ -1,5 +1,10 @@
 import type { ComfyMcpConfig } from "../config/schema.js";
+import { defaultStateDir } from "../config/paths.js";
+import { createMcpServer } from "../mcp/server.js";
+import { databasePathForStateDir, openDatabase } from "../persistence/database.js";
+import { AssetRepository, JobRepository } from "../persistence/repositories/index.js";
 import { listTools } from "../tools/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 export function getStdioContractSnapshot(config: ComfyMcpConfig): unknown {
   return {
@@ -9,11 +14,11 @@ export function getStdioContractSnapshot(config: ComfyMcpConfig): unknown {
 }
 
 export async function startStdioServer(config: ComfyMcpConfig): Promise<void> {
-  void config;
-  // The SDK-backed stdio server will be wired here after the contract and
-  // policy shell are stable. This function intentionally writes nothing to
-  // stdout so protocol frames cannot be polluted by logs.
-  await new Promise<void>(() => {
-    /* keep process alive */
+  const handle = openDatabase(databasePathForStateDir(config.stateDir ?? defaultStateDir()));
+  const server = createMcpServer(config, {
+    actorId: "local_stdio",
+    jobs: new JobRepository(handle.db),
+    assets: new AssetRepository(handle.db)
   });
+  await server.connect(new StdioServerTransport());
 }
